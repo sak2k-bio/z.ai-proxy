@@ -1,0 +1,22 @@
+{
+  "name": "z.ai-proxy",
+  "version": "1.0.0",
+  "description": "Z.ai API Proxy - OpenAI & Anthropic Compatible",
+  "main": "main.py",
+  "scripts": {
+    "start": "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/z.ai-proxy"
+  },
+  "keywords": [
+    "z.ai",
+    "openai",
+    "anthropic",
+    "proxy",
+    "glm-5"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}

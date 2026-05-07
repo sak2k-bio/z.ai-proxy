@@ -36,6 +36,25 @@ The proxy acts as a bridge between standard AI clients and Z.ai's web-based API.
 
 ## 🛠 Setup & Installation
 
+### Option 1: Deploy to Render (Recommended for Cloud)
+
+**One-Click Deploy:**
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+Or follow the [detailed deployment guide](RENDER_DEPLOY.md).
+
+**Quick Steps:**
+1. Fork this repository
+2. Go to [Render](https://render.com) and create a new Web Service
+3. Connect your GitHub repository
+4. Add environment variables (JWT_TOKEN, COOKIE)
+5. Deploy!
+
+Your proxy will be live at `https://your-service.onrender.com`
+
+### Option 2: Local Development
+
 ### 1. Retrieve your Z.ai Credentials
 
 To route traffic successfully, the proxy acts on behalf of your active Z.ai web session. You need to extract two values from your browser after logging into `chat.z.ai`:

@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: zai-proxy
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: JWT_TOKEN
+        sync: false
+      - key: COOKIE
+        sync: false
+    healthCheckPath: /

@@ -19,6 +19,45 @@ COOKIE = os.getenv("COOKIE")
 UPSTREAM_URL = "https://chat.z.ai/api/v2/chat/completions"
 FIXED_KEY = b"key-@@@@)))()((9))-xxxx&&&%%%%%"
 
+# Cache for storing an existing chat ID
+CACHED_CHAT_ID = None
+
+async def get_or_create_chat_id():
+    """Get an existing chat ID from the user's chat list"""
+    global CACHED_CHAT_ID
+
+    if CACHED_CHAT_ID:
+        return CACHED_CHAT_ID
+
+    # Fetch existing chats
+    url = "https://chat.z.ai/api/v1/chats/?page=1&type=default"
+    headers = {
+        "authorization": f"Bearer {JWT_TOKEN}",
+        "content-type": "application/json",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        "Cookie": COOKIE
+    }
+
+    session = AsyncSession()
+    try:
+        response = await session.get(url, headers=headers, impersonate="chrome120", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            # The response is a list, not a dict with 'results'
+            if isinstance(data, list) and len(data) > 0:
+                CACHED_CHAT_ID = data[0]['id']
+                print(f"[INFO] Using existing chat: {CACHED_CHAT_ID}", flush=True)
+                return CACHED_CHAT_ID
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch chat list: {e}", flush=True)
+    finally:
+        await session.close()
+
+    # Fallback: create a new chat ID
+    fallback_id = str(uuid.uuid4())
+    print(f"[WARNING] No existing chat found, using new ID: {fallback_id}", flush=True)
+    return fallback_id
+
 def get_user_id(jwt_token):
     try:
         payload_b64 = jwt_token.split('.')[1]
@@ -30,10 +69,10 @@ def get_user_id(jwt_token):
 
 USER_ID = get_user_id(JWT_TOKEN) if JWT_TOKEN else ""
 
-def generate_zai_request(messages, is_stream: bool, tools: list = None, tool_choice: str = None):
+async def generate_zai_request(messages, is_stream: bool, tools: list = None, tool_choice: str = None):
     timestamp = int(time.time() * 1000)
     request_id = str(uuid.uuid4())
-    chat_id = str(uuid.uuid4())
+    chat_id = await get_or_create_chat_id()  # Use existing chat
     current_msg_id = str(uuid.uuid4())
     
     last_prompt = messages[-1].get("content", "") if messages else ""
@@ -132,9 +171,9 @@ def generate_zai_request(messages, is_stream: bool, tools: list = None, tool_cho
             "enable_thinking": True
         },
         "chat_id": chat_id,
-        "id": request_id, 
+        "id": request_id,
         "current_user_message_id": current_msg_id,
-        "background_tasks": {"title_generation": True, "tags_generation": True}
+        "background_tasks": {"title_generation": False, "tags_generation": False}  # Disable for existing chats
     }
     
     if tools:
@@ -378,15 +417,15 @@ async def root():
 async def openai_proxy(request: Request):
     if not JWT_TOKEN:
         raise HTTPException(status_code=500, detail="JWT_TOKEN is missing")
-    
+
     try:
         data = await request.json()
         messages = data.get("messages", [])
         is_stream = data.get("stream", False)
         tools = data.get("tools")
         tool_choice = data.get("tool_choice")
-        
-        url, headers, payload = generate_zai_request(messages, is_stream, tools, tool_choice)
+
+        url, headers, payload = await generate_zai_request(messages, is_stream, tools, tool_choice)
         
         session = AsyncSession()
         
@@ -400,32 +439,40 @@ async def openai_proxy(request: Request):
                     stream=True,
                     timeout=60
                 )
-                
+
                 if response.status_code != 200:
-                    yield f"data: {json.dumps({'error': f'Upstream error: {response.status_code}'})}\n\n"
+                    error_text = await response.atext()
+                    yield f"data: {json.dumps({'error': f'Upstream error: {response.status_code} - {error_text[:200]}'})}\n\n"
                     yield "data: [DONE]\n\n"
                     return
-                
+
                 chat_cmpl_id = f"chatcmpl-{uuid.uuid4()}"
-                
+
                 async for chunk in response.aiter_lines():
                     if not chunk: continue
                     chunk = chunk.decode('utf-8')
                     if not chunk.startswith("data: "): continue
-                    
+
                     data_str = chunk[6:]
                     if data_str.strip() == "[DONE]":
                         yield "data: [DONE]\n\n"
                         break
-                    
+
                     try:
                         chunk_data = json.loads(data_str)
                     except json.JSONDecodeError:
                         continue
-                        
+
+                    # Check for errors first
+                    error_info = chunk_data.get("data", {}).get("error")
+                    if error_info:
+                        yield f"data: {json.dumps({'error': f'Z.ai error: {error_info}'})}\n\n"
+                        yield "data: [DONE]\n\n"
+                        break
+
                     delta_content = chunk_data.get("data", {}).get("delta_content", "")
                     is_done = chunk_data.get("data", {}).get("done", False)
-                    
+
                     if delta_content:
                         openai_chunk = {
                             "id": chat_cmpl_id,
@@ -435,10 +482,13 @@ async def openai_proxy(request: Request):
                             "choices": [{"index": 0, "delta": {"content": delta_content}}]
                         }
                         yield f"data: {json.dumps(openai_chunk)}\n\n"
-                        
+
                     if is_done:
                         yield "data: [DONE]\n\n"
                         break
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                yield "data: [DONE]\n\n"
             finally:
                 await session.close()
 
@@ -470,16 +520,16 @@ async def openai_proxy(request: Request):
 async def anthropic_proxy(request: Request):
     if not JWT_TOKEN:
         raise HTTPException(status_code=500, detail="JWT_TOKEN is missing")
-    
+
     try:
         data = await request.json()
         messages = data.get("messages", [])
         is_stream = data.get("stream", False)
         tools = data.get("tools")
         tool_choice = data.get("tool_choice")
-        
+
         # Anthropic format is slightly different, let's just support simple text messages for now.
-        url, headers, payload = generate_zai_request(messages, is_stream, tools, tool_choice)
+        url, headers, payload = await generate_zai_request(messages, is_stream, tools, tool_choice)
         
         session = AsyncSession()
         
