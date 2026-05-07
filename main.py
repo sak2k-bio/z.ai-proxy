@@ -69,13 +69,44 @@ def get_user_id(jwt_token):
 
 USER_ID = get_user_id(JWT_TOKEN) if JWT_TOKEN else ""
 
+def normalize_content(content):
+    """
+    Normalize message content to string.
+    Handles both string content and content arrays (multimodal format).
+
+    Examples:
+    - "Hello" -> "Hello"
+    - [{"type": "text", "text": "Hello"}] -> "Hello"
+    - [{"type": "text", "text": "Hi"}, {"type": "image_url", "image_url": {...}}] -> "Hi"
+    """
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        # Extract text from content array
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text_parts.append(item.get("text", ""))
+        return " ".join(text_parts)
+
+    return str(content)
+
 async def generate_zai_request(messages, is_stream: bool, tools: list = None, tool_choice: str = None):
     timestamp = int(time.time() * 1000)
     request_id = str(uuid.uuid4())
     chat_id = await get_or_create_chat_id()  # Use existing chat
     current_msg_id = str(uuid.uuid4())
-    
-    last_prompt = messages[-1].get("content", "") if messages else ""
+
+    # Normalize messages content to strings
+    normalized_messages = []
+    for msg in messages:
+        normalized_msg = msg.copy()
+        if "content" in normalized_msg:
+            normalized_msg["content"] = normalize_content(normalized_msg["content"])
+        normalized_messages.append(normalized_msg)
+
+    last_prompt = normalized_messages[-1].get("content", "") if normalized_messages else ""
     
     # 1. Generate Signature
     window_index = str(timestamp // 300000).encode()
@@ -158,7 +189,7 @@ async def generate_zai_request(messages, is_stream: bool, tools: list = None, to
     payload = {
         "stream": True, # Always stream from upstream so we don't timeout, we buffer if client wants no-stream
         "model": "glm-5",
-        "messages": messages,
+        "messages": normalized_messages,
         "signature_prompt": last_prompt,
         "params": {},
         "extra": {},
