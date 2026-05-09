@@ -29,6 +29,14 @@ TOKEN_LAST_CHECKED = None
 TOKEN_IS_VALID = True
 TOKEN_LAST_ERROR = None
 
+# Model fallback order when hitting capacity limits
+MODEL_FALLBACK_ORDER = [
+    "glm-5",
+    "claude-3-5-sonnet-20241022",
+    "gpt-4o",
+    "deepseek-chat"
+]
+
 async def check_token_health():
     """Background task to monitor token validity every hour"""
     global TOKEN_LAST_CHECKED, TOKEN_IS_VALID, TOKEN_LAST_ERROR
@@ -149,7 +157,7 @@ def normalize_content(content):
 
     return str(content)
 
-async def generate_zai_request(messages, is_stream: bool, tools: list = None, tool_choice: str = None):
+async def generate_zai_request(messages, is_stream: bool, model: str = "glm-5", tools: list = None, tool_choice: str = None):
     timestamp = int(time.time() * 1000)
     request_id = str(uuid.uuid4())
     chat_id = await get_or_create_chat_id()  # Use existing chat
@@ -245,7 +253,7 @@ async def generate_zai_request(messages, is_stream: bool, tools: list = None, to
     # 4. Payload
     payload = {
         "stream": True, # Always stream from upstream so we don't timeout, we buffer if client wants no-stream
-        "model": "glm-5",
+        "model": model,  # Use model from parameter
         "messages": normalized_messages,
         "signature_prompt": last_prompt,
         "params": {},
@@ -256,7 +264,7 @@ async def generate_zai_request(messages, is_stream: bool, tools: list = None, to
             "auto_web_search": False,
             "preview_mode": True,
             "flags": [],
-            "enable_thinking": True
+            "enable_thinking": False  # Disable thinking to get cleaner responses
         },
         "chat_id": chat_id,
         "id": request_id,
@@ -512,11 +520,12 @@ async def openai_proxy(request: Request):
         is_stream = data.get("stream", False)
         tools = data.get("tools")
         tool_choice = data.get("tool_choice")
+        requested_model = data.get("model", "glm-5")
 
-        url, headers, payload = await generate_zai_request(messages, is_stream, tools, tool_choice)
-        
+        url, headers, payload = await generate_zai_request(messages, is_stream, requested_model, tools, tool_choice)
+
         session = AsyncSession()
-        
+
         async def generate_stream():
             try:
                 response = await session.post(
@@ -554,6 +563,9 @@ async def openai_proxy(request: Request):
                     # Check for errors first
                     error_info = chunk_data.get("data", {}).get("error")
                     if error_info:
+                        # Check if it's a capacity error
+                        if isinstance(error_info, dict) and error_info.get("code") == "MODEL_CONCURRENCY_LIMIT":
+                            print(f"[WARNING] Model {requested_model} at capacity: {error_info}", flush=True)
                         yield f"data: {json.dumps({'error': f'Z.ai error: {error_info}'})}\n\n"
                         yield "data: [DONE]\n\n"
                         break
@@ -566,7 +578,7 @@ async def openai_proxy(request: Request):
                             "id": chat_cmpl_id,
                             "object": "chat.completion.chunk",
                             "created": int(time.time()),
-                            "model": "glm-5",
+                            "model": requested_model,
                             "choices": [{"index": 0, "delta": {"content": delta_content}}]
                         }
                         yield f"data: {json.dumps(openai_chunk)}\n\n"
@@ -585,22 +597,30 @@ async def openai_proxy(request: Request):
         else:
             # Buffer the streaming response and return JSON
             full_content = ""
+            chunk_count = 0
             async for chunk in generate_stream():
-                if chunk.startswith("data: ") and not "[DONE]" in chunk and "chat.completion.chunk" in chunk:
+                chunk_count += 1
+                if chunk.startswith("data: ") and not "[DONE]" in chunk:
                     try:
                         chunk_json = json.loads(chunk[6:])
-                        full_content += chunk_json["choices"][0]["delta"].get("content", "")
-                    except:
+                        if "choices" in chunk_json and len(chunk_json["choices"]) > 0:
+                            delta_content = chunk_json["choices"][0].get("delta", {}).get("content", "")
+                            if delta_content:
+                                full_content += delta_content
+                    except Exception as e:
+                        print(f"[DEBUG] Error parsing chunk: {e}", flush=True)
                         pass
-                
+
+            print(f"[DEBUG] Buffered {chunk_count} chunks, total content length: {len(full_content)}", flush=True)
+
             return {
                 "id": f"chatcmpl-{uuid.uuid4()}",
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": "glm-5",
+                "model": requested_model,
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": full_content}, "finish_reason": "stop"}]
             }
-            
+
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
