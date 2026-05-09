@@ -5,6 +5,8 @@ import json
 import base64
 import hmac
 import hashlib
+import asyncio
+from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from curl_cffi.requests import AsyncSession
@@ -22,9 +24,53 @@ FIXED_KEY = b"key-@@@@)))()((9))-xxxx&&&%%%%%"
 # Cache for storing an existing chat ID
 CACHED_CHAT_ID = None
 
+# Token health monitoring
+TOKEN_LAST_CHECKED = None
+TOKEN_IS_VALID = True
+TOKEN_LAST_ERROR = None
+
+async def check_token_health():
+    """Background task to monitor token validity every hour"""
+    global TOKEN_LAST_CHECKED, TOKEN_IS_VALID, TOKEN_LAST_ERROR
+
+    while True:
+        try:
+            # Test token by fetching chat list
+            url = "https://chat.z.ai/api/v1/chats/?page=1&type=default"
+            headers = {
+                "authorization": f"Bearer {JWT_TOKEN}",
+                "content-type": "application/json",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Cookie": COOKIE
+            }
+
+            session = AsyncSession()
+            response = await session.get(url, headers=headers, impersonate="chrome120", timeout=10)
+            await session.close()
+
+            TOKEN_IS_VALID = (response.status_code == 200)
+            TOKEN_LAST_CHECKED = datetime.utcnow()
+
+            if not TOKEN_IS_VALID:
+                TOKEN_LAST_ERROR = f"HTTP {response.status_code}"
+                print(f"[CRITICAL] Tokens expired or invalid! Status: {response.status_code}", flush=True)
+                print(f"[ACTION] Update JWT_TOKEN and COOKIE in Render dashboard", flush=True)
+            else:
+                TOKEN_LAST_ERROR = None
+                print(f"[INFO] Token health check passed at {TOKEN_LAST_CHECKED}", flush=True)
+
+        except Exception as e:
+            TOKEN_IS_VALID = False
+            TOKEN_LAST_ERROR = str(e)
+            TOKEN_LAST_CHECKED = datetime.utcnow()
+            print(f"[ERROR] Token health check failed: {e}", flush=True)
+
+        # Check every hour
+        await asyncio.sleep(3600)
+
 async def get_or_create_chat_id():
     """Get an existing chat ID from the user's chat list"""
-    global CACHED_CHAT_ID
+    global CACHED_CHAT_ID, TOKEN_IS_VALID, TOKEN_LAST_ERROR
 
     if CACHED_CHAT_ID:
         return CACHED_CHAT_ID
@@ -48,6 +94,17 @@ async def get_or_create_chat_id():
                 CACHED_CHAT_ID = data[0]['id']
                 print(f"[INFO] Using existing chat: {CACHED_CHAT_ID}", flush=True)
                 return CACHED_CHAT_ID
+        elif response.status_code == 401:
+            # Token expired
+            TOKEN_IS_VALID = False
+            TOKEN_LAST_ERROR = "401 Unauthorized"
+            print(f"[CRITICAL] JWT_TOKEN expired! Update environment variables.", flush=True)
+            raise HTTPException(
+                status_code=503,
+                detail="Service credentials expired. Please contact administrator."
+            )
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[ERROR] Failed to fetch chat list: {e}", flush=True)
     finally:
@@ -672,3 +729,20 @@ async def get_models():
             }
         ]
     }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint with token validity status"""
+    return {
+        "status": "healthy" if TOKEN_IS_VALID else "degraded",
+        "token_valid": TOKEN_IS_VALID,
+        "last_checked": TOKEN_LAST_CHECKED.isoformat() if TOKEN_LAST_CHECKED else None,
+        "last_error": TOKEN_LAST_ERROR,
+        "message": "Service operational" if TOKEN_IS_VALID else "Credentials expired - update JWT_TOKEN and COOKIE"
+    }
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background token health monitoring"""
+    asyncio.create_task(check_token_health())
+    print("[INFO] Token health monitoring started", flush=True)
