@@ -618,7 +618,12 @@ async def openai_proxy(request: Request):
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": requested_model,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": full_content}, "finish_reason": "stop"}]
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": full_content}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                }
             }
 
     except Exception as e:
